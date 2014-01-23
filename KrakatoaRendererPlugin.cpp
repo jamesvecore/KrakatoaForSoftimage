@@ -44,6 +44,7 @@
 #include <xsi_vector3f.h>
 #include <xsi_vector4f.h>
 #include <xsi_quaternionf.h>
+#include <xsi_color.h>
 #include <xsi_color4f.h>
 #include <xsi_kinematics.h>
 #include <xsi_light.h>
@@ -55,6 +56,9 @@
 #include <xsi_geometryaccessor.h>
 #include <xsi_polygonmesh.h>
 #include <xsi_utils.h>
+#include <xsi_shader.h>
+#include <xsi_shaderparameter.h>
+#include <xsi_sceneitem.h>
 
 #include <krakatoasr_progress.hpp>
 #include <krakatoasr_renderer.hpp>
@@ -114,7 +118,7 @@ struct RGBA
     unsigned char a;
 };
 
-// Krakatoa works in linear space, need to convert to sRGB to show in viewport
+// Krakatoa works in linear space, need to convert to sRGB to show in viewport/image viewer
 inline unsigned char linearToSRGB(float v)
 {
 	if (v <= 0.0f)
@@ -516,7 +520,7 @@ public:
     {}
 };
 
-static SILogger g_msgLogger; // lame global so we can log both in side and outside the render callback
+static SILogger g_msgLogger; // lame global so we can log both inside and outside the render callback
 
 inline krakatoasr::animated_transform Mat2AT(MATH::CMatrix4& mat4)
 {
@@ -526,61 +530,99 @@ inline krakatoasr::animated_transform Mat2AT(MATH::CMatrix4& mat4)
 		(float)mat4.GetValue(3, 0), (float)mat4.GetValue(3, 1), (float)mat4.GetValue(3, 2), (float)mat4.GetValue(3, 3));
 }
 
+
+void SetupLight(krakatoasr::light& klight, CString& name, XSI::MATH::CColor4f& col, float intensity, int decayExponent, float falloffStart, float falloffEnd)
+{
+	klight.set_name(name.GetAsciiString());
+	klight.set_flux(col.GetR() * intensity, col.GetG() * intensity, col.GetB() * intensity);
+	klight.set_decay_exponent(-decayExponent);
+	klight.use_near_attenuation(false); // not supported directly in the default light shader so we just turn off
+	if (decayExponent != 0)
+	{
+		klight.use_far_attenuation(true);
+		klight.set_far_attenuation(falloffStart, falloffEnd); // TODO: need to look at unit conversion possibly here... ugh
+	}
+	else
+	{
+		klight.use_far_attenuation(false);
+	}
+}
+
 void AddLight(krakatoasr::krakatoa_renderer& renderer, Light& light)
 {
 	Primitive lightPrim = light.GetActivePrimitive();
 
+	float intensity = 0.75;
+	XSI::MATH::CColor4f col(1.0, 1.0, 1.0, 1.0);
+	bool lightFalloff = false;
+	int falloffMode = 1;
+	float falloffStart = 1.0f;
+	float falloffEnd = 100.0f;
+	int decayExponent = 0; // default for krakatoa, no falloff
+
 	int   type = lightPrim.GetParameter("Type").GetValue();
 	float falloffExp = lightPrim.GetParameter("LightExponent").GetValue();
-	float intensity = lightPrim.GetParameter("LightEnergyIntens").GetValue();
-	float energyR = lightPrim.GetParameter("LightEnergyR").GetValue();
-	float energyG = lightPrim.GetParameter("LightEnergyG").GetValue();
-	float energyB = lightPrim.GetParameter("LightEnergyB").GetValue();
 
-	// TODO: support manual attenuation
+	// it took a while to figure this out...
+	Parameter p = lightPrim.GetParameter("LightShader"); // this is the "Light Shader" port/parameter on the Render Tree, and is a ShaderParameter
+	ShaderParameter outPort(p.GetSource()); // GetSource return the port driving the "Light Shader" port which is the "out" port on the "soft_light" generally
+	Shader shader(outPort.GetParent()); // this should be the soft_light shader node
+	if (shader.IsValid())
+	{
+		intensity = shader.GetParameter("intensity").GetValue();
+		col = shader.GetParameter("color").GetValue();
+		lightFalloff = shader.GetParameter("atten").GetValue();
+		falloffMode = shader.GetParameter("mode").GetValue(); // 1 == "Use Light Exponent", 0 == "Linear"
+		falloffStart = shader.GetParameterValue("start");
+		falloffEnd = shader.GetParameterValue("end");
 
+		if (lightFalloff == false)
+			decayExponent = 0;
+		else
+		{
+			if (falloffMode == 0)
+				decayExponent = 1;
+			else
+				decayExponent = (int)falloffExp; // this is not a perfect mapping
+		}
+	}
+		
 	switch (type)
 	{
-	case 0: // Point
-	{
-				point_light klight;
-				klight.set_name(light.GetName().GetAsciiString());
-				klight.set_flux(energyR * intensity, energyG * intensity, energyB * intensity);
-				klight.set_decay_exponent((int)falloffExp);
-				klight.use_near_attenuation(false);
-				klight.use_far_attenuation(false);
-				renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
-				break;
-	}
-	case 1: // Infinite / directional
-	{
-				direct_light klight;
-				klight.set_name(light.GetName().GetAsciiString());
-				klight.set_flux(energyR * intensity, energyG * intensity, energyB * intensity);
-				klight.set_decay_exponent((int)falloffExp);
-				klight.use_near_attenuation(false);
-				klight.use_far_attenuation(false);
-				renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
+		case 0: // Point
+		{
+			point_light klight;
+			SetupLight(klight, light.GetName(), col, intensity, decayExponent, falloffStart, falloffEnd);
+			renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
+			break;
+		}
+		case 1: // Infinite / directional
+		{
+			direct_light klight;
+			SetupLight(klight, light.GetName(), col, intensity, decayExponent, falloffStart, falloffEnd);
+			renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
 
-				break;
-	}
-	case 2: // Spot light
-	{
-				float lightConeAngleDeg = lightPrim.GetParameter("LightCone").GetValue();
+			break;
+		}
+		case 2: // Spot light
+		{
+			spot_light klight;
+			float maxAngle = lightPrim.GetParameter("LightCone").GetValue();
+			float minAngle = 0.0;
+			if (shader.IsValid())
+			{
+				minAngle = maxAngle - (float)shader.GetParameterValue("spread");
+				if (minAngle < 0.0)
+					minAngle = 0.0;
+			}
+										
+			klight.set_cone_angle(minAngle, maxAngle); // for now just put both in there
+			SetupLight(klight, light.GetName(), col, intensity, decayExponent, falloffStart, falloffEnd);
+			renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
 
-				spot_light klight;
-				klight.set_cone_angle(lightConeAngleDeg, lightConeAngleDeg); // for now just put both in there
-				klight.set_name(light.GetName().GetAsciiString());
-				klight.set_flux(energyR * intensity, energyG * intensity, energyB * intensity);
-				klight.set_decay_exponent((int)falloffExp);
-				klight.use_near_attenuation(false);
-				klight.use_far_attenuation(false);
-				renderer.add_light(&klight, Mat2AT(light.GetKinematics().GetGlobal().GetTransform().GetMatrix4()));
-
-				break;
+			break;
+		}
 	}
-	}
-
 }
 
 void SetShaderFromProperty(krakatoasr::krakatoa_renderer& renderer, Property& prop)
@@ -752,6 +794,19 @@ public:
 		unlock(); // ensure unlocked happens when this object goes out of scope
 	}
 };
+
+
+bool IsRenderVisible(SceneItem& obj)
+{
+	Property visProp;
+	CStatus res = obj.GetPropertyFromName("Visibility", visProp);
+	if (res.Succeeded())
+	{
+		bool renderVisible = visProp.GetParameterValue("rendvis");
+		return renderVisible;
+	}
+	return false;
+}
 
 SICALLBACK XSILoadPlugin( PluginRegistrar& in_reg )
 {
@@ -1118,20 +1173,23 @@ SICALLBACK KrakatoaSR_Process( CRef& in_context )
             for (int j=0; j < pointClouds.GetCount(); ++j)
             {
                 X3DObject child( pointClouds[j] );
-                Primitive& prim = child.GetActivePrimitive();   
-                bool valid = prim.IsValid();
-                Geometry& geom = prim.GetGeometry();
-                valid = geom.IsValid();
-				if (geom.GetPoints().GetCount() == 0)
+				if (IsRenderVisible(child))
 				{
-					Application().LogMessage(CString("Skipping point cloud since particle count is 0: ") + child.GetFullName(), siInfoMsg);
-				}
-				else
-				{
-					Application().LogMessage(CString("Adding particle stream from point cloud: ") + child.GetFullName(), siInfoMsg);
-					SIPointCloudParticleStream* pStream = new SIPointCloudParticleStream(geom);
-					pStreamInterfaces.push_back(pStream);
-					krakatoa.add_particle_stream(particle_stream::create_from_particle_stream_interface(pStream));
+					Primitive& prim = child.GetActivePrimitive();
+					bool valid = prim.IsValid();
+					Geometry& geom = prim.GetGeometry();
+					valid = geom.IsValid();
+					if (geom.GetPoints().GetCount() == 0)
+					{
+						Application().LogMessage(CString("Skipping point cloud since particle count is 0: ") + child.GetFullName(), siInfoMsg);
+					}
+					else
+					{
+						Application().LogMessage(CString("Adding particle stream from point cloud: ") + child.GetFullName(), siInfoMsg);
+						SIPointCloudParticleStream* pStream = new SIPointCloudParticleStream(geom);
+						pStreamInterfaces.push_back(pStream);
+						krakatoa.add_particle_stream(particle_stream::create_from_particle_stream_interface(pStream));
+					}
 				}
             }
 
@@ -1173,7 +1231,7 @@ SICALLBACK KrakatoaSR_Process( CRef& in_context )
                             for (int k=0; k < groupMembers.GetCount(); k++)
                             {
                                 Light light(groupMembers[k]);
-                                if (light.IsValid())
+								if (light.IsValid() && IsRenderVisible(light))
                                 {
                                     AddLight(krakatoa, light);
                                 }
@@ -1193,7 +1251,10 @@ SICALLBACK KrakatoaSR_Process( CRef& in_context )
             CRef& ref = lights[i];
             Light light(ref);
             bool valid = light.IsValid();
-            AddLight(krakatoa, light);
+			if (light.IsValid() && IsRenderVisible(light))
+			{
+				AddLight(krakatoa, light);
+			}
         }
     }
        
