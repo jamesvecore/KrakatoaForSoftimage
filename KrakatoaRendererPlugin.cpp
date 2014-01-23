@@ -535,7 +535,7 @@ void SetupLight(krakatoasr::light& klight, CString& name, XSI::MATH::CColor4f& c
 {
 	klight.set_name(name.GetAsciiString());
 	klight.set_flux(col.GetR() * intensity, col.GetG() * intensity, col.GetB() * intensity);
-	klight.set_decay_exponent(-decayExponent);
+	klight.set_decay_exponent(decayExponent);
 	klight.use_near_attenuation(false); // not supported directly in the default light shader so we just turn off
 	if (decayExponent != 0)
 	{
@@ -574,7 +574,7 @@ void AddLight(krakatoasr::krakatoa_renderer& renderer, Light& light)
 		lightFalloff = shader.GetParameter("atten").GetValue();
 		falloffMode = shader.GetParameter("mode").GetValue(); // 1 == "Use Light Exponent", 0 == "Linear"
 		falloffStart = shader.GetParameterValue("start");
-		falloffEnd = shader.GetParameterValue("end");
+		falloffEnd = shader.GetParameterValue("stop");
 
 		if (lightFalloff == false)
 			decayExponent = 0;
